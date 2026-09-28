@@ -22,9 +22,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  IMAGE_PREFIX: store
-
 jobs:
   # Runs once, before any build. A wrong registry or a read-only token
   # otherwise fails at the very end of a full three-image build, after all the
@@ -119,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for repo in "store/api" "store/frontend" "store/admin"; do
+          for repo in "api" "frontend" "admin"; do
             encoded=$(printf '%s' "${repo}" | sed 's|/|%2F|')
             code=$(curl -sS -o /dev/null -w '%{http_code}' \
                      "https://hub.docker.com/v2/repositories/${USERNAME}/${encoded}/" || true)
@@ -175,8 +172,8 @@ jobs:
           context: ${{ matrix.service }}
           push: true
           tags: |
-            ${{ needs.preflight.outputs.registry }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:sha-${{ github.sha }}
-            ${{ needs.preflight.outputs.registry }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:latest
+            ${{ needs.preflight.outputs.registry }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:sha-${{ github.sha }}
+            ${{ needs.preflight.outputs.registry }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -204,10 +201,10 @@ jobs:
         run: |
           set -euo pipefail
           for pair in "api" "frontend" "admin"; do
-            docker pull "${REGISTRY}/${{ env.IMAGE_PREFIX }}/${pair}:sha-${{ github.sha }}"
+            docker pull "${REGISTRY}/${pair}:sha-${{ github.sha }}"
             # Re-tag to the name compose expects, so the stack runs the artifact
             # that was just published rather than a fresh local build.
-            docker tag "${REGISTRY}/${{ env.IMAGE_PREFIX }}/${pair}:sha-${{ github.sha }}" \
+            docker tag "${REGISTRY}/${pair}:sha-${{ github.sha }}" \
                        "store/${pair}:ci"
           done
 
