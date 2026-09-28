@@ -1,9 +1,19 @@
 name: CI
 
-# Runs on every pull request and every push. Holds no secrets and never pushes
-# an image, so a pull request from a fork - including one that edits a script to
-# print its environment - has nothing to steal. The push path lives in
-# release.yml, which only ever runs on a branch you control.
+# Three stages, in cost order: code, then build, then test.
+#
+# The order is not arbitrary. Each stage costs more than the one before it, and
+# each one can be made to fail by a smaller mistake:
+#
+#   code   ~20s   lint.      A trailing space fails here, not after a build.
+#   build  ~90s   compile.   Three images, in parallel. A broken import fails here.
+#   test   ~60s   behaviour. 35 tests against a real database.
+#
+# So the cheapest gate runs first and stops the rest. The cost of this ordering
+# is that a test failure is only discovered after the images have built. That is
+# a deliberate trade: fail-fast on trivial mistakes, and accept ~90s of wasted
+# build time when something subtler is wrong. Removing `needs:` from the test job
+# runs the stages in parallel instead, if you would rather pay the other way.
 
 on:
   push:
@@ -12,24 +22,92 @@ on:
   workflow_dispatch:
 
 # Read-only by default. A workflow that does not need write access should say so.
+# Nothing here reads a secret or publishes anything, which is what makes it safe
+# to run on a pull request from a fork.
 permissions:
   contents: read
 
-# A new push to the same branch makes the previous run pointless. Releasing does
-# not get this, because a half-finished push must never be cancelled.
+# A new push to the same branch makes the previous run pointless, so cancel it.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ------------------------------------------------------------------ backend --
-  backend:
-    name: Lint + test (backend)
+  # ============================================================== 1. CODE =====
+  code:
+    name: "1 · Code quality"
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install lint tooling
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
+      # No ESLint here yet. The frontends ship no linter, so this stage covers
+      # the backend only. Adding ESLint to both would make it a real polyglot
+      # code gate rather than a Python-only one.
+
+  # ============================================================= 2. BUILD =====
+  build:
+    name: "2 · Build (${{ matrix.service }})"
+    runs-on: ubuntu-latest
+    needs: code
+    strategy:
+      # One failure should not cancel the other two: a broken admin image does
+      # not make the backend image less interesting to look at.
+      fail-fast: false
+      matrix:
+        service: [backend, frontend, admin]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # This is the build that matters. The frontends are Vite apps, and their
+      # `npm run build` runs inside the builder stage of their own Dockerfile -
+      # so building the image compiles the frontend. There is no separate
+      # "npm run build" step because it would be the same work twice.
+      #
+      # push is false and always will be in this file: CI proves the images
+      # build, it does not publish them.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service }}
+          push: false
+          tags: store/${{ matrix.service }}:ci-${{ github.sha }}
+          # Cross-run cache, keyed by the build context. A source-only change
+          # reuses every layer up to COPY; a dependency change invalidates from
+          # there down, which is why the Dockerfiles copy lockfiles first.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================== 3. TEST =====
+  test:
+    name: "3 · Test"
+    runs-on: ubuntu-latest
+    needs: build
+    defaults:
+      run:
+        working-directory: backend
 
     # Pytest runs against real PostgreSQL rather than SQLite. SQLite accepts
     # things Postgres rejects and vice versa, so testing on SQLite hides exactly
-    # the bugs worth catching. That means the job owns a database.
+    # the bugs worth catching. That means this job owns a database.
     services:
       postgres:
         image: postgres:16-alpine
@@ -52,10 +130,6 @@ jobs:
       # this job deliberately has none.
       SECRET_KEY: ci-test-secret-not-used-anywhere-else-0123456789
 
-    defaults:
-      run:
-        working-directory: backend
-
     steps:
       - uses: actions/checkout@v4
 
@@ -68,66 +142,5 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Lint
-        run: ruff check .
-
       - name: Test
         run: python -m pytest
-
-  # ----------------------------------------------------------------- frontend --
-  # Build is the gate for now, not lint. There is no ESLint installed and no
-  # test runner, and a pipeline step that cannot pass is worse than no step.
-  # `npm run build` still fails hard on a syntax error, a broken import, or a
-  # bad Tailwind config. Adding ESLint and Vitest is the next upgrade.
-  frontend:
-    name: Build (frontend, admin)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        service: [frontend, admin]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          # Keyed on the lockfile, so a source-only change reuses the cache and
-          # a dependency change invalidates it.
-          cache: npm
-          cache-dependency-path: ${{ matrix.service }}/package-lock.json
-
-      - name: Install
-        # npm ci, not npm install: installs exactly what the lockfile pins and
-        # fails if it disagrees with package.json.
-        run: npm ci
-        working-directory: ${{ matrix.service }}
-
-      - name: Build
-        run: npm run build
-        working-directory: ${{ matrix.service }}
-
-  # ------------------------------------------------------------------- images --
-  # Proves the Dockerfiles still build, using the same definitions the stack
-  # runs from locally. push is false: this job must never publish.
-  images:
-    name: Build image (${{ matrix.service }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        service: [backend, frontend, admin]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.service }}
-          push: false
-          tags: store/${{ matrix.service }}:ci-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
