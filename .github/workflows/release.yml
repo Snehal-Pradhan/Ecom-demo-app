@@ -23,13 +23,44 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REGISTRY: snehalpradhan
   IMAGE_PREFIX: store
 
 jobs:
+  # Runs once, before any build. A wrong registry or a read-only token
+  # otherwise fails at the very end of a full three-image build, after all the
+  # time and compute, with a message that does not name the actual problem.
+  preflight:
+    name: Verify registry access
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.check.outputs.registry }}
+    steps:
+      - name: Check who this token actually belongs to
+        id: check
+        env:
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+
+          # Ask Docker Hub who we are, rather than assuming the secret is right.
+          who=$(curl -fsS https://hub.docker.com/v2/user/ \
+                -H "Authorization: JWT ${TOKEN}" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
+          echo "token authenticates as : ${who}"
+          echo "DOCKERHUB_USERNAME     : ${USERNAME}"
+
+          if [ "$who" != "$USERNAME" ]; then
+            echo "::error::DOCKERHUB_USERNAME is '${USERNAME}' but the token belongs to '${who}'. Pushes to '${USERNAME}/*' will be denied."
+            exit 1
+          fi
+
+          echo "registry=${who}" >> "$GITHUB_OUTPUT"
+
   build-and-push:
     name: Build + push ${{ matrix.service }}
     runs-on: ubuntu-latest
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -45,10 +76,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # The registry comes from the preflight output, which came from asking
+      # Docker Hub who the token belongs to. One source of truth: there is no
+      # hardcoded username that can drift away from the secret.
+      #
       # sha-<commit> is the tag that matters: immutable, and traceable to exactly
       # the source that produced it. A `latest` tag is mutable by definition, so
-      # two hosts running it minutes apart can be running different code with no
-      # way to tell. Everything else here is a convenience label on top.
+      # two hosts pulling it minutes apart can run different code with no way to
+      # tell. Everything else here is a convenience label on top.
       #
       # backend maps to the api service, so the matrix name and the image name
       # do not match - hence the explicit service->name mapping.
@@ -58,8 +93,8 @@ jobs:
           context: ${{ matrix.service }}
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:sha-${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:latest
+            ${{ needs.preflight.outputs.registry }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:sha-${{ github.sha }}
+            ${{ needs.preflight.outputs.registry }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -69,7 +104,7 @@ jobs:
   smoke:
     name: Smoke test the published images
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: [preflight, build-and-push]
 
     steps:
       - uses: actions/checkout@v4
@@ -82,15 +117,16 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Pull the images this run pushed
+        env:
+          REGISTRY: ${{ needs.preflight.outputs.registry }}
         run: |
-          for pair in "backend:api" "frontend:frontend" "admin:admin"; do
-            dir="${pair%%:*}"
-            name="${pair##*:}"
-            docker pull "${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${name}:sha-${{ github.sha }}"
+          set -euo pipefail
+          for pair in "api" "frontend" "admin"; do
+            docker pull "${REGISTRY}/${{ env.IMAGE_PREFIX }}/${pair}:sha-${{ github.sha }}"
             # Re-tag to the name compose expects, so the stack runs the artifact
             # that was just published rather than a fresh local build.
-            docker tag "${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${name}:sha-${{ github.sha }}" \
-                       "store/${name}:ci"
+            docker tag "${REGISTRY}/${{ env.IMAGE_PREFIX }}/${pair}:sha-${{ github.sha }}" \
+                       "store/${pair}:ci"
           done
 
       - name: Start the stack from the pulled images
