@@ -69,23 +69,43 @@ jobs:
       # and reports the failure as "insufficient_scope" rather than as a missing
       # repository, which reads like a permissions fault. Creating a repository
       # is a one-time human action, so this verifies rather than creates.
-      - name: Confirm target repositories exist
+      # Two different things are checked here, and they are not the same check.
+      #
+      # A repository can EXIST and still be unpushable. Docker Hub reports a
+      # freshly created empty repository as present via its web API, but the
+      # registry will not grant write scope for it, and the push then fails at
+      # auth.docker.io with "access token has insufficient scopes" - which reads
+      # like a token problem and is not. status 1 is active; 0 is inactive, and
+      # an inactive repository has to be pushed to once by hand before CI can
+      # write to it.
+      - name: Confirm target repositories exist and are active
         run: |
           set -euo pipefail
           missing=()
+          inactive=()
           for repo in api frontend admin; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' \
-                     "https://hub.docker.com/v2/repositories/${{ env.DOCKERHUB_USER }}/${repo}/" || true)
-            if [ "${code}" = "200" ]; then
-              echo "found    ${{ env.DOCKERHUB_USER }}/${repo}"
-            else
-              echo "missing  ${{ env.DOCKERHUB_USER }}/${repo}"
-              missing+=("${repo}")
-            fi
+            body=$(curl -sS "https://hub.docker.com/v2/repositories/${{ env.DOCKERHUB_USER }}/${repo}/")
+            status=$(printf '%s' "${body}" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status'))" 2>/dev/null || echo "null")
+            case "${status}" in
+              1)  echo "active    ${{ env.DOCKERHUB_USER }}/${repo}" ;;
+              0)  echo "inactive  ${{ env.DOCKERHUB_USER }}/${repo}"
+                   inactive+=("${repo}") ;;
+              *)  echo "absent    ${{ env.DOCKERHUB_USER }}/${repo}"
+                   missing+=("${repo}") ;;
+            esac
           done
           if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::Create these once, by hand: https://hub.docker.com/r/${{ env.DOCKERHUB_USER }}/"
+            echo "::error::Create these first, one per image, at https://hub.docker.com/r/${{ env.DOCKERHUB_USER }}/"
             echo "::error::${missing[*]}"
+            exit 1
+          fi
+          if [ ${#inactive[@]} -gt 0 ]; then
+            echo "::error::These exist but have never had an image pushed, so the registry will not grant write scope for them:"
+            echo "::error::${inactive[*]}"
+            echo "::error::Activate each one once, by hand:"
+            echo "::error::  docker login   # your Docker Hub password, not the token"
+            echo "::error::  docker pull hello-world"
+            echo "::error::  for r in ${inactive[*]}; do docker tag hello-world ${{ env.DOCKERHUB_USER }}/\$r:latest && docker push ${{ env.DOCKERHUB_USER }}/\$r:latest; done"
             exit 1
           fi
 
