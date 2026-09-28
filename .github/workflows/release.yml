@@ -57,26 +57,50 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1. Who does this token belong to? Do not assume the secret is right.
-          who=$(curl -fsS https://hub.docker.com/v2/user/ \
-                -H "Authorization: JWT ${TOKEN}" \
-                | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
-          echo "token authenticates as : ${who}"
-          echo "DOCKERHUB_USERNAME     : ${USERNAME}"
-
-          if [ "$who" != "$USERNAME" ]; then
-            echo "::error::DOCKERHUB_USERNAME is '${USERNAME}' but the token belongs to '${who}'. Pushes to '${USERNAME}/*' will be denied."
-            exit 1
+          # 1. Who does this token belong to? Best effort, not a hard gate.
+          #
+          #    This is an advisory lookup against hub.docker.com, not the
+          #    registry, and it is the least reliable part of this script: any
+          #    non-200 or unexpected response shape used to abort the release
+          #    with a raw curl error that said nothing useful. So a failure
+          #    here falls back to the configured username and continues - the
+          #    write probe below is the gate that actually matters.
+          code=$(curl -sS -o /tmp/who.json -w '%{http_code}' \
+                   https://hub.docker.com/v2/user/ \
+                   -H "Authorization: JWT ${TOKEN}" || true)
+          # Docker Hub has accepted both schemes for personal access tokens
+          # depending on the endpoint. Try the other one before giving up.
+          if [ "${code}" != "200" ]; then
+            code=$(curl -sS -o /tmp/who.json -w '%{http_code}' \
+                     https://hub.docker.com/v2/user/ \
+                     -H "Authorization: Bearer ${TOKEN}" || true)
+          fi
+          who=""
+          if [ "${code}" = "200" ]; then
+            who=$(python3 -c "import json;print(json.load(open('/tmp/who.json'))['username'])" 2>/dev/null || true)
           fi
 
-          # 2. Can it actually write? `docker login` succeeds on a read-only
-          #    token, so a successful login proves nothing about push access.
-          #    The real test is a push, and the cheapest real push is a
-          #    FROM scratch image: no base to pull, nothing to compile.
+          if [ -z "${who}" ]; then
+            echo "::warning::Identity lookup returned HTTP ${code}; falling back to DOCKERHUB_USERNAME. Response: $(head -c 300 /tmp/who.json)"
+            who="${USERNAME}"
+          fi
+
+          echo "token authenticates as : ${who}"
+          echo "DOCKERHUB_USERNAME     : ${USERNAME}"
+          if [ "${who}" != "${USERNAME}" ]; then
+            echo "::warning::These differ. If the push is denied, this mismatch is why."
+          fi
+
+          # 2. The real gate: can this token actually write?
+          #    `docker login` succeeds on a read-only token, so a clean login
+          #    proves nothing. A FROM scratch image is the cheapest possible
+          #    real push: no base to pull, nothing to compile.
           printf 'FROM scratch\n' > /tmp/Dockerfile.probe
-          docker build -q -t "${who}/${PROBE}:write-probe" /tmp >/dev/null
+          echo "probing write access with a ${who}/${PROBE}:write-probe push"
+          docker build -t "${who}/${PROBE}:write-probe" -f /tmp/Dockerfile.probe /tmp
           if ! docker push "${who}/${PROBE}:write-probe"; then
-            echo "::error::Token for '${who}' authenticated fine but cannot push. Regenerate it on Docker Hub with scope 'Read & Write' (not 'Read'), then update the DOCKERHUB_TOKEN secret."
+            echo "::error::Token for '${who}' authenticated but cannot push to '${PROBE}', a repository that already exists."
+            echo "::error::If the scope reads 'Read & Write', the DOCKERHUB_TOKEN secret is probably holding a different token than the one you think - check for an older value or a trailing newline."
             exit 1
           fi
           echo "write access confirmed"
