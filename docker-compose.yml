@@ -1,14 +1,20 @@
-# Local full-stack. Production deployments use Elastic Beanstalk + RDS, not this.
+# docker compose up -d --build
 #
-#   docker compose up --build
+# This replaces six long `docker run` commands with one declaration. The
+# interesting part is not the shorthand - it is the three things that were
+# previously manual and are now guaranteed:
 #
-# Every image is built from a Dockerfile in its own directory, so the same
-# build definition is used locally and in CI. If they diverge, the pipeline
-# tests something nobody runs.
+#   1. Service names ARE the DNS names. `api`, `db`, `redis` resolve on an
+#      implicit network compose creates for you. No IPs anywhere.
+#   2. Startup order is enforced by health, not by hope. `depends_on` with a
+#      condition waits until a service is genuinely usable, not merely started.
+#   3. Only the two services a browser needs publish ports. The database and
+#      API are unreachable from outside this host.
 
 name: store
 
 services:
+  # ------------------------------------------------------------- database --
   db:
     image: postgres:16-alpine
     environment:
@@ -17,84 +23,91 @@ services:
       POSTGRES_DB: store
     volumes:
       - db_data:/var/lib/postgresql/data
+    # The stock postgres image has no healthcheck, so one is declared here.
+    # pg_isready answers only once the server accepts connections - which is
+    # genuinely later than "the container started".
     healthcheck:
-      # Depends on a real query, not just a listening socket, so dependent
-      # containers never start against a database that is not ready to accept
-      # connections yet.
       test: ["CMD-SHELL", "pg_isready -U store -d store"]
       interval: 5s
-      timeout: 5s
-      retries: 10
-    ports:
-      - "5432:5432"
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
 
+  # ---------------------------------------------------------------- cache --
   redis:
     image: redis:7-alpine
-    # Cache only: no persistence, so there is nothing to lose on restart.
-    # Note the directive spelling: Redis 7.4 renamed `append-only` to
-    # `appendonly` and now refuses to start on the old name.
+    # Cache only, so there is nothing worth persisting.
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
 
-  api:
-    build:
-      context: ./backend
-    environment:
-      DATABASE_URL: postgresql+psycopg://store:store@db:5432/store
-      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env - the app refuses a placeholder in production}
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      REDIS_URL: redis://redis:6379/0
-      CORS_ORIGINS: http://localhost:3000,http://localhost:5173
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    ports:
-      - "8000:8000"
-
-  # One-shot: creates the schema and inserts demo data, then exits.
+  # ------------------------------------------------------------ seed data --
+  # A one-shot job: creates the schema and inserts demo data, then exits.
+  # Idempotent, so it is safe on every `up`. It is a service, not a step.
   seed:
-    build:
-      context: ./backend
+    build: ./backend
     environment:
       DATABASE_URL: postgresql+psycopg://store:store@db:5432/store
+      REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
-      ENVIRONMENT: ${ENVIRONMENT:-development}
     command: ["python", "-m", "app.seed"]
     depends_on:
       db:
         condition: service_healthy
     restart: "no"
 
-  frontend:
-    build:
-      context: ./frontend
+  # ------------------------------------------------------------------ api --
+  api:
+    build: ./backend
     environment:
-      # nginx resolves this at startup; there is no localhost fallback on purpose.
+      DATABASE_URL: postgresql+psycopg://store:store@db:5432/store
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    depends_on:
+      # Wait for the schema to exist, not just for the database to be up. This
+      # is the condition that stops the API crash-looping on first boot.
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # No `ports`. The API is reachable as `api:8000` from the network and from
+    # nowhere else. Publishing it would expose it to the host and the internet.
+    # Its healthcheck comes from the image, so every environment inherits it.
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- storefront --
+  frontend:
+    build: ./frontend
+    environment:
+      # The service name is the hostname. No DNS server to configure, no IP to
+      # discover, and it stays correct if the api container is replaced.
       BACKEND_HOST: api
       BACKEND_PORT: "8000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "3000:8080"
+    restart: unless-stopped
 
+  # ----------------------------------------------------------------- admin --
   admin:
-    build:
-      context: ./admin
+    build: ./admin
     environment:
       BACKEND_HOST: api
       BACKEND_PORT: "8000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "5173:8080"
+    restart: unless-stopped
 
 volumes:
   db_data:

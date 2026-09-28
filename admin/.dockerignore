@@ -1,8 +1,14 @@
+# Without this, the host's node_modules (macOS/arm64) is copied into the build
+# stage and clobbers the one npm ci creates inside the Linux container.
 node_modules
+
+# Built inside the image, not shipped in from the host.
 dist
+
 .git
-.env
-.env.*
-!.env.example
+.env*
 *.log
-.vite
+
+.DS_Store
+Dockerfile
+.dockerignore

@@ -1,47 +1,44 @@
 # syntax=docker/dockerfile:1
-#
-# Build the Vite bundle, then serve the static output from nginx as an
-# unprivileged, read-only container. The final image contains no Node.js and no
-# node_modules, which is typically 300-400 MB smaller than a Node runtime image.
 
-# ---------------------------------------------------------------- build stage
-FROM node:22-alpine AS builder
+ARG NODE_IMAGE=node:22.23.3-alpine3.24
+ARG NGINX_IMAGE=nginx:1.27-alpine
 
-WORKDIR /build
+# ----------------------------------------------------------------- builder --
+FROM ${NODE_IMAGE} AS builder
 
-# Lockfile-first, so `npm ci` is used instead of `npm install`. npm ci installs
-# exactly what the lockfile pins and fails if package.json and the lockfile
-# disagree, which is what stops "worked yesterday" dependency drift.
+WORKDIR /app
+
+# Lockfile first: keeps `npm ci` cached across source-only changes.
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# No NODE_ENV=production here - it would skip devDependencies and the build
+# would fail with "vite: not found".
 COPY . .
 RUN npm run build
 
-# -------------------------------------------------------------- runtime stage
-FROM nginx:1.27-alpine AS runtime
+# ----------------------------------------------------------------- runtime --
+FROM ${NGINX_IMAGE} AS runtime
 
-# nginx:alpine ships an unprivileged `nginx` user and a pid file under /tmp.
-RUN touch /var/run/nginx.pid \
- && chown -R nginx:nginx /var/run/nginx.pid /var/cache/nginx
+LABEL org.opencontainers.image.title="store-admin" \
+      org.opencontainers.image.source="https://github.com/Snehal-Pradhan/Ecom-demo-app"
 
-COPY --from=builder --chown=nginx:nginx /build/dist /usr/share/nginx/html
+COPY --from=builder --chown=nginx:nginx /app/dist /usr/share/nginx/html
 
-# Static shim; the real config is rendered into /tmp/nginx at startup.
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Rendered at container start, so one image works in any environment.
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+ENV NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d
 
-# Render into /tmp so the unprivileged nginx user can write there, instead of
-# needing write access to /etc/nginx/conf.d. The directory must be created here:
-# the entrypoint tests that the output directory is already writable and skips
-# rendering entirely if it is not.
-ENV NGINX_ENVSUBST_OUTPUT_DIR=/tmp/nginx
-RUN mkdir -p /tmp/nginx && chown nginx:nginx /tmp/nginx && chmod 755 /tmp/nginx
+# chown must precede USER; the config dir is written by the entrypoint.
+RUN touch /var/run/nginx.pid \
+ && chown -R nginx:nginx /var/run/nginx.pid /var/cache/nginx /var/log/nginx /etc/nginx/conf.d
 
 USER nginx
 EXPOSE 8080
 
+# Hits /healthz, which nginx answers without the backend. Checking the API here
+# would restart healthy containers during a dependency outage.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || exit 1
+  CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]
