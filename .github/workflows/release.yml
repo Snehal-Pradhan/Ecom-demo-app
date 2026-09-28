@@ -93,10 +93,17 @@ jobs:
       # A broken admin image does not make the backend image less interesting.
       fail-fast: false
       matrix:
-        # The build context is the directory; the image is called api, because
-        # that is what the service is called everywhere else.
-        context: [backend, frontend, admin]
-        image: [api, frontend, admin]
+        # include, not two parallel lists. Two lists in one matrix produce the
+        # CARTESIAN PRODUCT - [a,b,c] x [x,y,z] is nine combinations, not three -
+        # so this would build nine images and push them all at the same two tags
+        # concurrently. include gives exactly the three pairs intended.
+        include:
+          - context: backend
+            image: api
+          - context: frontend
+            image: frontend
+          - context: admin
+            image: admin
 
     steps:
       - uses: actions/checkout@v4
