@@ -117,7 +117,11 @@ def test_every_admin_route_rejects_anonymous_callers(client, seeded):
     admin_paths = [
         ("GET", "/api/v1/admin/stats", None),
         ("GET", "/api/v1/admin/products", None),
-        ("POST", "/api/v1/admin/products", {"sku": "X", "name": "X", "price": "1.00", "category": "C"}),
+        (
+            "POST",
+            "/api/v1/admin/products",
+            {"sku": "X", "name": "X", "price": "1.00", "category": "C"},
+        ),
         ("PUT", "/api/v1/admin/products/1", {"name": "X"}),
         ("DELETE", "/api/v1/admin/products/1", None),
         ("GET", "/api/v1/admin/orders", None),

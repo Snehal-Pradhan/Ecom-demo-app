@@ -1,0 +1,127 @@
+name: Release
+
+# The only workflow that holds credentials and the only one that publishes.
+# It never runs on pull_request, so untrusted code can never reach this path.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DOCKERHUB_USERNAME
+#   DOCKERHUB_TOKEN      a read/write token, NOT the account password
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a release. Abandoning a push halfway leaves some images tagged
+# and some not, which is worse than taking the extra few minutes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: snehalpradhan
+  IMAGE_PREFIX: store
+
+jobs:
+  build-and-push:
+    name: Build + push ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [backend, frontend, admin]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # sha-<commit> is the tag that matters: immutable, and traceable to exactly
+      # the source that produced it. A `latest` tag is mutable by definition, so
+      # two hosts running it minutes apart can be running different code with no
+      # way to tell. Everything else here is a convenience label on top.
+      #
+      # backend maps to the api service, so the matrix name and the image name
+      # do not match - hence the explicit service->name mapping.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:sha-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service == 'backend' && 'api' || matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Proves the artifact that was just published actually serves traffic, by
+  # pulling those exact images - not rebuilding them - and running the real
+  # compose topology against them.
+  smoke:
+    name: Smoke test the published images
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull the images this run pushed
+        run: |
+          for pair in "backend:api" "frontend:frontend" "admin:admin"; do
+            dir="${pair%%:*}"
+            name="${pair##*:}"
+            docker pull "${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${name}:sha-${{ github.sha }}"
+            # Re-tag to the name compose expects, so the stack runs the artifact
+            # that was just published rather than a fresh local build.
+            docker tag "${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${name}:sha-${{ github.sha }}" \
+                       "store/${name}:ci"
+          done
+
+      - name: Start the stack from the pulled images
+        env:
+          IMAGE_TAG: ci
+          SECRET_KEY: release-smoke-secret-at-least-32-characters
+        run: docker compose up -d --no-build
+
+      - name: Wait and smoke test
+        env:
+          IMAGE_TAG: ci
+          SECRET_KEY: release-smoke-secret-at-least-32-characters
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/healthz >/dev/null 2>&1; then
+              echo "storefront up after ~$((i*5))s"
+              break
+            fi
+            sleep 5
+          done
+          docker compose ps
+          # Through the storefront, not the API's own port. The API deliberately
+          # publishes no port to the host, so :8000 is unreachable from a runner -
+          # and that is the correct topology, not a bug. Going through nginx
+          # exercises the real path a browser takes, including the reverse proxy.
+          ./scripts/smoke.sh http://localhost:3000
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

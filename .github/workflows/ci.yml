@@ -1,0 +1,133 @@
+name: CI
+
+# Runs on every pull request and every push. Holds no secrets and never pushes
+# an image, so a pull request from a fork - including one that edits a script to
+# print its environment - has nothing to steal. The push path lives in
+# release.yml, which only ever runs on a branch you control.
+
+on:
+  push:
+    branches: ["**"]   # all branches, not tags
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default. A workflow that does not need write access should say so.
+permissions:
+  contents: read
+
+# A new push to the same branch makes the previous run pointless. Releasing does
+# not get this, because a half-finished push must never be cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------ backend --
+  backend:
+    name: Lint + test (backend)
+    runs-on: ubuntu-latest
+
+    # Pytest runs against real PostgreSQL rather than SQLite. SQLite accepts
+    # things Postgres rejects and vice versa, so testing on SQLite hides exactly
+    # the bugs worth catching. That means the job owns a database.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: store
+          POSTGRES_PASSWORD: store
+          POSTGRES_DB: store_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U store -d store_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: postgresql+psycopg://store:store@localhost:5432/store_test
+      # A throwaway value. Tests assert on behaviour, not on a real secret, and
+      # this job deliberately has none.
+      SECRET_KEY: ci-test-secret-not-used-anywhere-else-0123456789
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+  # ----------------------------------------------------------------- frontend --
+  # Build is the gate for now, not lint. There is no ESLint installed and no
+  # test runner, and a pipeline step that cannot pass is worse than no step.
+  # `npm run build` still fails hard on a syntax error, a broken import, or a
+  # bad Tailwind config. Adding ESLint and Vitest is the next upgrade.
+  frontend:
+    name: Build (frontend, admin)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, admin]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # Keyed on the lockfile, so a source-only change reuses the cache and
+          # a dependency change invalidates it.
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Install
+        # npm ci, not npm install: installs exactly what the lockfile pins and
+        # fails if it disagrees with package.json.
+        run: npm ci
+        working-directory: ${{ matrix.service }}
+
+      - name: Build
+        run: npm run build
+        working-directory: ${{ matrix.service }}
+
+  # ------------------------------------------------------------------- images --
+  # Proves the Dockerfiles still build, using the same definitions the stack
+  # runs from locally. push is false: this job must never publish.
+  images:
+    name: Build image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [backend, frontend, admin]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service }}
+          push: false
+          tags: store/${{ matrix.service }}:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -48,6 +48,21 @@ server {
         proxy_read_timeout 30s;
     }
 
+    # The API's own probes, forwarded so they are reachable through the front
+    # door. A load balancer or a post-deploy check in front of this container can
+    # then ask whether the whole path works, not just this container.
+    #
+    # Distinct from /healthz below, which is nginx answering alone. /healthz
+    # must never depend on the API: a health check that fails on a dependency
+    # restarts healthy containers during an outage.
+    location = /health {
+        proxy_pass http://backend_upstream/health;
+    }
+
+    location = /ready {
+        proxy_pass http://backend_upstream/ready;
+    }
+
     # Answered from this config, no upstream involved.
     location = /healthz {
         access_log off;
