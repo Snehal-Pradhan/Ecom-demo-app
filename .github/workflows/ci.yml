@@ -35,7 +35,7 @@ concurrency:
 jobs:
   # ============================================================== 1. CODE =====
   code:
-    name: "1 · Code quality"
+    name: Code
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -62,7 +62,7 @@ jobs:
 
   # ============================================================= 2. BUILD =====
   build:
-    name: "2 · Build (${{ matrix.service }})"
+    name: Build
     runs-on: ubuntu-latest
     needs: code
     strategy:
@@ -98,7 +98,7 @@ jobs:
 
   # ============================================================== 3. TEST =====
   test:
-    name: "3 · Test"
+    name: Test
     runs-on: ubuntu-latest
     needs: build
     defaults:
