@@ -27,10 +27,8 @@ jobs:
   preflight:
     name: Verify registry
     runs-on: ubuntu-latest
-    outputs:
-      registry: ${{ steps.verify.outputs.registry }}
     env:
-      USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
       # An existing repository, so the probe creates nothing. Delete the tag
       # from the Docker Hub UI whenever; nothing depends on it.
       PROBE_REPO: github-actions-practice-master
@@ -49,17 +47,19 @@ jobs:
       # FROM scratch is the cheapest possible real push: no base to pull,
       # nothing to compile.
       - name: Confirm the token can write
-        id: verify
         run: |
           set -euo pipefail
           printf 'FROM scratch\n' > /tmp/Dockerfile.probe
-          docker build -t "${{ env.USERNAME }}/${{ env.PROBE_REPO }}:write-probe" -f /tmp/Dockerfile.probe /tmp
-          if ! docker push "${{ env.USERNAME }}/${{ env.PROBE_REPO }}:write-probe"; then
-            echo "::error::Cannot push to '${{ env.USERNAME }}/${{ env.PROBE_REPO }}', which already exists."
+          docker build -t "${{ env.DOCKERHUB_USER }}/${{ env.PROBE_REPO }}:write-probe" -f /tmp/Dockerfile.probe /tmp
+          if ! docker push "${{ env.DOCKERHUB_USER }}/${{ env.PROBE_REPO }}:write-probe"; then
+            echo "::error::Cannot push to '${{ env.DOCKERHUB_USER }}/${{ env.PROBE_REPO }}', which already exists."
             echo "::error::Either DOCKERHUB_TOKEN is not this account's token, or its scope is not 'Read & Write'."
             exit 1
           fi
-          echo "registry=${{ env.USERNAME }}" >> "$GITHUB_OUTPUT"
+          # Echo the resolved registry so it is visible in the log. An empty
+          # value here is what produced the invalid tag "/admin:latest" in
+          # v0.2.1, and it was invisible until buildx rejected the reference.
+          echo "registry=${{ env.DOCKERHUB_USER }}"
 
       # Docker Hub does not auto-create repositories on push for this account,
       # and reports the failure as "insufficient_scope" rather than as a missing
@@ -71,16 +71,16 @@ jobs:
           missing=()
           for repo in api frontend admin; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' \
-                     "https://hub.docker.com/v2/repositories/${{ env.USERNAME }}/${repo}/" || true)
+                     "https://hub.docker.com/v2/repositories/${{ env.DOCKERHUB_USER }}/${repo}/" || true)
             if [ "${code}" = "200" ]; then
-              echo "found    ${{ env.USERNAME }}/${repo}"
+              echo "found    ${{ env.DOCKERHUB_USER }}/${repo}"
             else
-              echo "missing  ${{ env.USERNAME }}/${repo}"
+              echo "missing  ${{ env.DOCKERHUB_USER }}/${repo}"
               missing+=("${repo}")
             fi
           done
           if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::Create these once, by hand: https://hub.docker.com/r/${{ env.USERNAME }}/"
+            echo "::error::Create these once, by hand: https://hub.docker.com/r/${{ env.DOCKERHUB_USER }}/"
             echo "::error::${missing[*]}"
             exit 1
           fi
@@ -121,8 +121,8 @@ jobs:
           # code with no way to tell. It is a convenience label, never the thing
           # you deploy by.
           tags: |
-            ${{ needs.preflight.outputs.registry }}/${{ matrix.image }}:sha-${{ github.sha }}
-            ${{ needs.preflight.outputs.registry }}/${{ matrix.image }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:sha-${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -143,15 +143,13 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Pull what was just pushed
-        env:
-          REGISTRY: ${{ needs.preflight.outputs.registry }}
         run: |
           set -euo pipefail
           for image in api frontend admin; do
-            docker pull "${REGISTRY}/${image}:sha-${{ github.sha }}"
+            docker pull "${{ secrets.DOCKERHUB_USERNAME }}/${image}:sha-${{ github.sha }}"
             # Re-tag to the name compose expects, so the stack runs the published
             # artifact instead of a fresh local build.
-            docker tag "${REGISTRY}/${image}:sha-${{ github.sha }}" "store/${image}:ci"
+            docker tag "${{ secrets.DOCKERHUB_USERNAME }}/${image}:sha-${{ github.sha }}" "store/${image}:ci"
           done
 
       - name: Start the stack
