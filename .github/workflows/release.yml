@@ -1,0 +1,182 @@
+name: Release
+
+# The only workflow that holds credentials and the only one that publishes.
+# It never runs on pull_request, so untrusted code can never reach this path.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DOCKERHUB_USERNAME
+#   DOCKERHUB_TOKEN      a Personal Access Token with "Repo Read & Write"
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a release. Abandoning a push halfway leaves some images tagged
+# and some not, which is worse than taking the extra few minutes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Everything that can fail in seconds, checked before a single image is built.
+  preflight:
+    name: Verify registry
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.verify.outputs.registry }}
+    env:
+      USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      # An existing repository, so the probe creates nothing. Delete the tag
+      # from the Docker Hub UI whenever; nothing depends on it.
+      PROBE_REPO: github-actions-practice-master
+
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # One push answers three questions at once: is the token valid, is the
+      # username the token's own account, and does it have write scope. A
+      # successful `docker login` answers none of them - it succeeds on a
+      # read-only token, and on a token belonging to a different account.
+      #
+      # FROM scratch is the cheapest possible real push: no base to pull,
+      # nothing to compile.
+      - name: Confirm the token can write
+        id: verify
+        run: |
+          set -euo pipefail
+          printf 'FROM scratch\n' > /tmp/Dockerfile.probe
+          docker build -t "${{ env.USERNAME }}/${{ env.PROBE_REPO }}:write-probe" -f /tmp/Dockerfile.probe /tmp
+          if ! docker push "${{ env.USERNAME }}/${{ env.PROBE_REPO }}:write-probe"; then
+            echo "::error::Cannot push to '${{ env.USERNAME }}/${{ env.PROBE_REPO }}', which already exists."
+            echo "::error::Either DOCKERHUB_TOKEN is not this account's token, or its scope is not 'Read & Write'."
+            exit 1
+          fi
+          echo "registry=${{ env.USERNAME }}" >> "$GITHUB_OUTPUT"
+
+      # Docker Hub does not auto-create repositories on push for this account,
+      # and reports the failure as "insufficient_scope" rather than as a missing
+      # repository, which reads like a permissions fault. Creating a repository
+      # is a one-time human action, so this verifies rather than creates.
+      - name: Confirm target repositories exist
+        run: |
+          set -euo pipefail
+          missing=()
+          for repo in api frontend admin; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                     "https://hub.docker.com/v2/repositories/${{ env.USERNAME }}/${repo}/" || true)
+            if [ "${code}" = "200" ]; then
+              echo "found    ${{ env.USERNAME }}/${repo}"
+            else
+              echo "missing  ${{ env.USERNAME }}/${repo}"
+              missing+=("${repo}")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Create these once, by hand: https://hub.docker.com/r/${{ env.USERNAME }}/"
+            echo "::error::${missing[*]}"
+            exit 1
+          fi
+
+  build-and-push:
+    name: Build (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: preflight
+    strategy:
+      # A broken admin image does not make the backend image less interesting.
+      fail-fast: false
+      matrix:
+        # The build context is the directory; the image is called api, because
+        # that is what the service is called everywhere else.
+        context: [backend, frontend, admin]
+        image: [api, frontend, admin]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          # sha-<commit> is the tag that matters: immutable, and traceable to
+          # exactly the source that produced it. `latest` is mutable by
+          # definition, so two hosts pulling it minutes apart can run different
+          # code with no way to tell. It is a convenience label, never the thing
+          # you deploy by.
+          tags: |
+            ${{ needs.preflight.outputs.registry }}/${{ matrix.image }}:sha-${{ github.sha }}
+            ${{ needs.preflight.outputs.registry }}/${{ matrix.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Proves the artifacts that were just published actually serve traffic, by
+  # pulling those exact images rather than rebuilding them. A rebuild would
+  # validate something nobody is going to run.
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    needs: [preflight, build-and-push]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull what was just pushed
+        env:
+          REGISTRY: ${{ needs.preflight.outputs.registry }}
+        run: |
+          set -euo pipefail
+          for image in api frontend admin; do
+            docker pull "${REGISTRY}/${image}:sha-${{ github.sha }}"
+            # Re-tag to the name compose expects, so the stack runs the published
+            # artifact instead of a fresh local build.
+            docker tag "${REGISTRY}/${image}:sha-${{ github.sha }}" "store/${image}:ci"
+          done
+
+      - name: Start the stack
+        env:
+          IMAGE_TAG: ci
+          SECRET_KEY: release-smoke-secret-at-least-32-characters
+        run: docker compose up -d --no-build
+
+      - name: Smoke test
+        env:
+          IMAGE_TAG: ci
+          SECRET_KEY: release-smoke-secret-at-least-32-characters
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/healthz >/dev/null 2>&1; then
+              echo "storefront up after ~$((i * 5))s"
+              break
+            fi
+            sleep 5
+          done
+          docker compose ps
+          # Through the storefront, not the API's own port. The API publishes
+          # no port to the host by design, so :8000 is unreachable from a runner
+          # and that is correct. Going through nginx exercises the real browser
+          # path, reverse proxy included.
+          ./scripts/smoke.sh http://localhost:3000
+
+      - name: Logs
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

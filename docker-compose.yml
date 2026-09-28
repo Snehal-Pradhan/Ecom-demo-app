@@ -64,6 +64,7 @@ services:
   # ------------------------------------------------------------------ api --
   api:
     build: ./backend
+    image: store/api:${IMAGE_TAG:-latest}
     environment:
       DATABASE_URL: postgresql+psycopg://store:store@db:5432/store
       REDIS_URL: redis://redis:6379/0
@@ -84,6 +85,7 @@ services:
   # ------------------------------------------------------------- storefront --
   frontend:
     build: ./frontend
+    image: store/frontend:${IMAGE_TAG:-latest}
     environment:
       # The service name is the hostname. No DNS server to configure, no IP to
       # discover, and it stays correct if the api container is replaced.
@@ -99,6 +101,7 @@ services:
   # ----------------------------------------------------------------- admin --
   admin:
     build: ./admin
+    image: store/admin:${IMAGE_TAG:-latest}
     environment:
       BACKEND_HOST: api
       BACKEND_PORT: "8000"
