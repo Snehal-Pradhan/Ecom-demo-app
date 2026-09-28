@@ -34,16 +34,30 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       registry: ${{ steps.check.outputs.registry }}
+    env:
+      # The probe pushes a two-byte image to a repository that already exists,
+      # so this creates no new repository. It exists to answer one question -
+      # "can this token actually write?" - which neither `docker login` nor the
+      # identity check can answer. Delete the tag from the Docker Hub UI at any
+      # time; nothing depends on it.
+      PROBE_REPO: github-actions-practice-master
+
     steps:
-      - name: Check who this token actually belongs to
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Check identity and write access
         id: check
         env:
           TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          PROBE: ${{ env.PROBE_REPO }}
         run: |
           set -euo pipefail
 
-          # Ask Docker Hub who we are, rather than assuming the secret is right.
+          # 1. Who does this token belong to? Do not assume the secret is right.
           who=$(curl -fsS https://hub.docker.com/v2/user/ \
                 -H "Authorization: JWT ${TOKEN}" \
                 | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
@@ -54,6 +68,18 @@ jobs:
             echo "::error::DOCKERHUB_USERNAME is '${USERNAME}' but the token belongs to '${who}'. Pushes to '${USERNAME}/*' will be denied."
             exit 1
           fi
+
+          # 2. Can it actually write? `docker login` succeeds on a read-only
+          #    token, so a successful login proves nothing about push access.
+          #    The real test is a push, and the cheapest real push is a
+          #    FROM scratch image: no base to pull, nothing to compile.
+          printf 'FROM scratch\n' > /tmp/Dockerfile.probe
+          docker build -q -t "${who}/${PROBE}:write-probe" /tmp >/dev/null
+          if ! docker push "${who}/${PROBE}:write-probe"; then
+            echo "::error::Token for '${who}' authenticated fine but cannot push. Regenerate it on Docker Hub with scope 'Read & Write' (not 'Read'), then update the DOCKERHUB_TOKEN secret."
+            exit 1
+          fi
+          echo "write access confirmed"
 
           echo "registry=${who}" >> "$GITHUB_OUTPUT"
 
