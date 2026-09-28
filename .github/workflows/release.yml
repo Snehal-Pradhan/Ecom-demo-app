@@ -34,31 +34,35 @@ jobs:
       PROBE_REPO: github-actions-practice-master
 
     steps:
+      - uses: docker/setup-buildx-action@v3
+
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # One push answers three questions at once: is the token valid, is the
-      # username the token's own account, and does it have write scope. A
-      # successful `docker login` answers none of them - it succeeds on a
-      # read-only token, and on a token belonging to a different account.
-      #
-      # FROM scratch is the cheapest possible real push: no base to pull,
-      # nothing to compile.
-      - name: Confirm the token can write
+      # This deliberately uses buildx and --push, exactly like the real build
+      # below. A probe that used `docker build && docker push` would prove the
+      # credentials work and nothing else - it would not exercise buildx, the
+      # cache backend, or attestation handling, which is where the previous two
+      # failures actually lived. The target is a repository that already exists,
+      # so this creates nothing.
+      - name: Confirm the token can push through buildx
         run: |
           set -euo pipefail
-          printf 'FROM scratch\n' > /tmp/Dockerfile.probe
-          docker build -t "${{ env.DOCKERHUB_USER }}/${{ env.PROBE_REPO }}:write-probe" -f /tmp/Dockerfile.probe /tmp
-          if ! docker push "${{ env.DOCKERHUB_USER }}/${{ env.PROBE_REPO }}:write-probe"; then
-            echo "::error::Cannot push to '${{ env.DOCKERHUB_USER }}/${{ env.PROBE_REPO }}', which already exists."
-            echo "::error::Either DOCKERHUB_TOKEN is not this account's token, or its scope is not 'Read & Write'."
+          # buildx reads a file literally named Dockerfile from the context, so
+          # the context gets its own directory rather than a -f flag.
+          mkdir -p /tmp/probe
+          printf 'FROM scratch\n' > /tmp/probe/Dockerfile
+          if ! docker buildx build \
+                --push \
+                --provenance=true \
+                --tag "${{ env.DOCKERHUB_USER }}/${{ env.PROBE_REPO }}:write-probe" \
+                /tmp/probe; then
+            echo "::error::buildx could not push. This is the same path the release build uses."
+            echo "::error::If the tag above resolved to an empty registry, the secret is missing."
             exit 1
           fi
-          # Echo the resolved registry so it is visible in the log. An empty
-          # value here is what produced the invalid tag "/admin:latest" in
-          # v0.2.1, and it was invisible until buildx rejected the reference.
           echo "registry=${{ env.DOCKERHUB_USER }}"
 
       # Docker Hub does not auto-create repositories on push for this account,
@@ -115,6 +119,18 @@ jobs:
         with:
           context: ${{ matrix.context }}
           push: true
+          # Provenance attestations push an extra OCI artifact alongside the
+          # image. Docker Hub's support for OCI referrers is incomplete, and
+          # when it is not there the push fails at the very last step - after
+          # a successful build, with a credentials error that is not about
+          # credentials. The preflight probe does not use buildx, so it does not
+          # exercise this path and cannot catch it.
+          #
+          # Provenance is worth having in a supply-chain-conscious pipeline, and
+          # it is cheap to turn back on if you move to a registry that supports
+          # it properly.
+          provenance: false
+          sbom: false
           # sha-<commit> is the tag that matters: immutable, and traceable to
           # exactly the source that produced it. `latest` is mutable by
           # definition, so two hosts pulling it minutes apart can run different
