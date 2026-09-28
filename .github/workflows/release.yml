@@ -107,31 +107,37 @@ jobs:
 
           echo "registry=${who}" >> "$GITHUB_OUTPUT"
 
-      # Docker Hub does not reliably auto-create a repository on push, and the
-      # failure when it doesn't is opaque: "repository does not exist or may
-      # require authorization", which reads like a permissions problem rather
-      # than a missing repository. Ensuring the target exists first turns that
-      # into a non-event.
-      - name: Ensure repositories exist
+      # Docker Hub does not auto-create a repository on push for this account,
+      # and the failure when it doesn't is worded to look like a permissions
+      # problem: "repository does not exist or may require authorization:
+      # insufficient_scope". Creating the repository is a one-time human action,
+      # not something a release should be doing, so this verifies rather than
+      # creates - and says exactly what to do.
+      - name: Verify target repositories exist
         env:
-          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           set -euo pipefail
+          missing=()
           for repo in "store/api" "store/frontend" "store/admin"; do
             encoded=$(printf '%s' "${repo}" | sed 's|/|%2F|')
-            code=$(curl -sS -o /tmp/body -w '%{http_code}' -X POST \
-              "https://hub.docker.com/v2/repositories/${USERNAME}/" \
-              -H "Authorization: JWT ${TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"name\": \"${repo}\"}")
-            case "${code}" in
-              201) echo "created  ${USERNAME}/${repo}" ;;
-              409) echo "exists   ${USERNAME}/${repo}" ;;
-              *)   echo "::error::Could not ensure ${USERNAME}/${repo} (HTTP ${code}): $(cat /tmp/body)"
-                   exit 1 ;;
-            esac
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                     "https://hub.docker.com/v2/repositories/${USERNAME}/${encoded}/" || true)
+            if [ "${code}" = "200" ]; then
+              echo "found    ${USERNAME}/${repo}"
+            else
+              echo "missing  ${USERNAME}/${repo}  (HTTP ${code})"
+              missing+=("${repo}")
+            fi
           done
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::These repositories must be created once, by hand, at:"
+            echo "::error::  https://hub.docker.com/r/${USERNAME}/"
+            echo "::error::Create: ${missing[*]}"
+            echo "::error::Docker Hub reports a missing repository as insufficient_scope, which reads like a permissions fault. It is not."
+            exit 1
+          fi
 
   build-and-push:
     name: Build + push ${{ matrix.service }}
