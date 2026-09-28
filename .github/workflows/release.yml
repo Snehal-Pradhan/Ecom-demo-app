@@ -83,6 +83,32 @@ jobs:
 
           echo "registry=${who}" >> "$GITHUB_OUTPUT"
 
+      # Docker Hub does not reliably auto-create a repository on push, and the
+      # failure when it doesn't is opaque: "repository does not exist or may
+      # require authorization", which reads like a permissions problem rather
+      # than a missing repository. Ensuring the target exists first turns that
+      # into a non-event.
+      - name: Ensure repositories exist
+        env:
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          for repo in "store/api" "store/frontend" "store/admin"; do
+            encoded=$(printf '%s' "${repo}" | sed 's|/|%2F|')
+            code=$(curl -sS -o /tmp/body -w '%{http_code}' -X POST \
+              "https://hub.docker.com/v2/repositories/${USERNAME}/" \
+              -H "Authorization: JWT ${TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\": \"${repo}\"}")
+            case "${code}" in
+              201) echo "created  ${USERNAME}/${repo}" ;;
+              409) echo "exists   ${USERNAME}/${repo}" ;;
+              *)   echo "::error::Could not ensure ${USERNAME}/${repo} (HTTP ${code}): $(cat /tmp/body)"
+                   exit 1 ;;
+            esac
+          done
+
   build-and-push:
     name: Build + push ${{ matrix.service }}
     runs-on: ubuntu-latest
