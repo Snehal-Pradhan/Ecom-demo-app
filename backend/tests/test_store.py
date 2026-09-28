@@ -48,7 +48,9 @@ def test_adding_same_product_twice_merges_lines(client, seeded):
     headers = auth_header(client, "cust@example.com")
     product_id = client.get("/api/v1/products").json()[0]["id"]
 
-    client.post("/api/v1/cart/items", json={"product_id": product_id, "quantity": 1}, headers=headers)
+    client.post(
+        "/api/v1/cart/items", json={"product_id": product_id, "quantity": 1}, headers=headers
+    )
     response = client.post("/api/v1/cart/items", json={"product_id": product_id, "quantity": 2},
                            headers=headers)
     assert response.json()["item_count"] == 3
@@ -71,14 +73,18 @@ def test_carts_are_isolated_per_user(client, seeded):
     admin = auth_header(client, "admin@example.com")
     product_id = client.get("/api/v1/products").json()[0]["id"]
 
-    client.post("/api/v1/cart/items", json={"product_id": product_id, "quantity": 1}, headers=customer)
+    client.post(
+        "/api/v1/cart/items", json={"product_id": product_id, "quantity": 1}, headers=customer
+    )
     assert client.get("/api/v1/cart", headers=admin).json()["items"] == []
 
 
 def test_place_order_computes_totals_and_clears_cart(client, seeded):
     headers = auth_header(client, "cust@example.com")
     product = next(p for p in client.get("/api/v1/products").json() if p["sku"] == "T-001")
-    client.post("/api/v1/cart/items", json={"product_id": product["id"], "quantity": 2}, headers=headers)
+    client.post(
+        "/api/v1/cart/items", json={"product_id": product["id"], "quantity": 2}, headers=headers
+    )
 
     response = client.post(
         "/api/v1/orders",
@@ -104,7 +110,9 @@ def test_placing_an_order_decrements_stock(client, seeded):
     product = next(p for p in client.get("/api/v1/products").json() if p["sku"] == "T-001")
     before = product["stock"]
 
-    client.post("/api/v1/cart/items", json={"product_id": product["id"], "quantity": 3}, headers=headers)
+    client.post(
+        "/api/v1/cart/items", json={"product_id": product["id"], "quantity": 3}, headers=headers
+    )
     client.post(
         "/api/v1/orders",
         json={"shipping_address": {"name": "C", "line1": "L", "city": "C", "postcode": "1"}},
@@ -119,7 +127,9 @@ def test_order_totals_are_exact_for_money(client, seeded):
     """0.1 + 0.2 != 0.3 in binary floating point. Decimal keeps cents honest."""
     headers = auth_header(client, "cust@example.com")
     product = next(p for p in client.get("/api/v1/products").json() if p["sku"] == "T-002")
-    client.post("/api/v1/cart/items", json={"product_id": product["id"], "quantity": 3}, headers=headers)
+    client.post(
+        "/api/v1/cart/items", json={"product_id": product["id"], "quantity": 3}, headers=headers
+    )
 
     order = client.post(
         "/api/v1/orders",
@@ -149,7 +159,9 @@ def test_users_only_see_their_own_orders(client, seeded):
     customer = auth_header(client, "cust@example.com")
     admin = auth_header(client, "admin@example.com")
     product_id = client.get("/api/v1/products").json()[0]["id"]
-    client.post("/api/v1/cart/items", json={"product_id": product_id, "quantity": 1}, headers=customer)
+    client.post(
+        "/api/v1/cart/items", json={"product_id": product_id, "quantity": 1}, headers=customer
+    )
     order = client.post(
         "/api/v1/orders",
         json={"shipping_address": {"name": "C", "line1": "L", "city": "C", "postcode": "1"}},
@@ -203,7 +215,9 @@ def test_cancelling_an_order_restores_stock(client, seeded):
 
     product = next(p for p in client.get("/api/v1/products").json() if p["sku"] == "T-001")
     before = product["stock"]
-    client.post("/api/v1/cart/items", json={"product_id": product["id"], "quantity": 4}, headers=customer)
+    client.post(
+        "/api/v1/cart/items", json={"product_id": product["id"], "quantity": 4}, headers=customer
+    )
     order = client.post(
         "/api/v1/orders",
         json={"shipping_address": {"name": "C", "line1": "L", "city": "C", "postcode": "1"}},

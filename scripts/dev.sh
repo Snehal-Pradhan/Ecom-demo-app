@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# Run the whole stack on the host: PostgreSQL and Redis must already be
-# running, then the API and both frontends start as background processes.
+# Run the whole stack locally with no Docker: PostgreSQL and Redis must already
+# be running, then the API and both frontends start as background processes.
 #
 #   ./scripts/dev.sh start     start everything
 #   ./scripts/dev.sh stop      stop the app processes (leaves the databases up)
 #   ./scripts/dev.sh status    show what is listening
 #   ./scripts/dev.sh logs      tail all three logs
 #
-# This is the only supported way to run the app, so it is kept to one command
-# rather than a four-step ritual.
+# Docker is the supported path for reproducing CI exactly. This script exists
+# because a container round-trip on every save is a slow inner loop.
 
 set -euo pipefail
 
