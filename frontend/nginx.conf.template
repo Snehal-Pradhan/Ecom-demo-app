@@ -1,0 +1,66 @@
+# nginx config for the storefront. Serves the static Vite bundle and proxies the
+# API to the backend, so the browser only ever sees one origin and CORS is not
+# part of normal operation.
+
+# Substituted from the environment at container start by the nginx image's
+# envsubst-on-templates entrypoint. There is deliberately no localhost
+# fallback: silently proxying to 127.0.0.1 is how a container ships and
+# then serves 502s in production.
+upstream backend_upstream {
+    # Replaced at deploy time by the compose/CI environment. There is no sane
+    # default: silently falling back to localhost is how a container ships and
+    # then serves 502s in production.
+    server ${BACKEND_HOST}:${BACKEND_PORT};
+}
+
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Do not advertise the exact nginx version.
+    server_tokens off;
+
+    # Baseline hardening. This is a floor, not a substitute for a WAF.
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    gzip on;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    # Hashed build assets are immutable, so cache them hard.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # index.html must never be cached, or a deploy leaves clients on old bundles.
+    location = /index.html {
+        add_header Cache-Control "no-store, must-revalidate";
+    }
+
+    # The SPA router: unknown paths must return index.html, not 404.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://backend_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+    }
+
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+}
