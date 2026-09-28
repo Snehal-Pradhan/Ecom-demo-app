@@ -1,7 +1,7 @@
 # Store
 
-A three-tier e-commerce application built to be deployed by a CI/CD pipeline:
-React storefront, React admin panel, FastAPI API, PostgreSQL, Redis.
+A three-tier e-commerce application: React storefront, React admin panel, FastAPI
+API, PostgreSQL, Redis. Runs directly on the host; no containers.
 
 It exists as the demo workload for a CI/CD series, so the parts a pipeline
 touches are first-class: three independently built images, two health
@@ -19,55 +19,59 @@ admin       React 18 + Vite  ─┘         │            Redis 7
 
 ## Quick start
 
-### Docker (recommended)
+### Run it
+
+Needs Python 3.11+, Node 20+, PostgreSQL, and Redis.
 
 ```bash
-cp .env.example .env
-# set SECRET_KEY to any string of 32+ characters
-docker compose up --build
+cp .env.example .env          # optional; sensible defaults are built in
+./scripts/dev.sh start
+./scripts/dev.sh status
+./scripts/dev.sh stop
 ```
 
-| Service    | URL                            |
-| ---------- | ------------------------------ |
-| Storefront | http://localhost:3000          |
-| Admin      | http://localhost:5173          |
-| API docs   | http://localhost:8000/docs     |
-| API health | http://localhost:8000/health   |
+| Service    | URL                        |
+| ---------- | -------------------------- |
+| Storefront | http://localhost:3000      |
+| Admin      | http://localhost:5173      |
+| API docs   | http://localhost:8000/docs |
+| API health | http://localhost:8000/health |
 
-Demo accounts, created by the `seed` service:
+Demo accounts, created by `python -m app.seed`:
 
 | Role     | Email                  | Password      |
 | -------- | ---------------------- | ------------- |
 | Customer | `customer@example.com` | `Password123` |
 | Admin    | `admin@example.com`    | `Password123` |
 
-### Local, without Docker
-
-Needs Python 3.11+, Node 20+, PostgreSQL, and Redis already running.
+### First-time setup
 
 ```bash
-# 1. Databases
+# Databases
 createuser -s store --pwprompt            # password: store
 createdb -O store store
+brew services start postgresql@15
+brew services start redis
 
-# 2. API
+# API
 python3.11 -m venv backend/.venv
 backend/.venv/bin/pip install -r backend/requirements-dev.txt
-(cd backend && .venv/bin/python -m app.seed)
-./scripts/dev.sh start
 
-./scripts/dev.sh status
-./scripts/dev.sh stop
+# Schema and demo data
+(cd backend && .venv/bin/python -m app.seed)
+
+# Frontends
+(cd frontend && npm install)
+(cd admin && npm install)
 ```
 
 ## Layout
 
 ```
-backend/     FastAPI app, tests, Dockerfile
-frontend/    Storefront (Vite), nginx.conf.template, Dockerfile
-admin/       Admin panel (Vite), nginx.conf.template, Dockerfile
-scripts/     dev.sh (run locally), smoke.sh (post-deploy gate)
-infra/       reserved for Terraform (later in the series)
+backend/     FastAPI app, tests, requirements
+frontend/    Storefront (Vite + React)
+admin/       Admin panel (Vite + React)
+scripts/     dev.sh (run everything), smoke.sh (post-deploy gate)
 ```
 
 ## The API
@@ -134,8 +138,8 @@ Decisions worth stating, because each one is a deliberate trade rather than an
 accident.
 
 **Dependencies are fully pinned, including transitive ones.** `requirements.txt`
-is a `pip freeze` of a set that was verified against the test suite, and the
-Dockerfiles install with `npm ci` against a committed lockfile. This is not
+is a `pip freeze` of a set that was verified against the test suite, and both
+frontends commit an npm lockfile that is installed with `npm ci`. This is not
 fastidiousness. While building the app this series' predecessor, three separate
 runtime failures came from unpinned dependencies: a `psycopg2`/`psycopg3` dialect
 mismatch, a `postcss` 8.5 release breaking Tailwind 3, and an ESLint plugin
@@ -187,10 +191,6 @@ admin surface and asserts none of it answers an anonymous caller. That test
 exists because during development the `CurrentAdmin` dependency was defined and
 then never attached to the routes: every admin endpoint was reachable without
 authentication, and the tests caught it on the first run.
-
-**Containers run as non-root, as `app` (1001) and `nginx` (101).** Build
-tooling stays in the builder stage. The frontend runtime image is 22 MB and
-contains only static files, with no Node.js and no `node_modules`.
 
 ## What is deliberately not here
 
