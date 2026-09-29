@@ -1,32 +1,53 @@
 name: CICD
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
 
 jobs:
   code:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     steps:
-      - name: Clone the Code
-        run: echo "Cloning the Code"
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+  lint:
+    needs: [code]
+    strategy:
+      matrix:
+        include:
+          - service: frontend
+          - service: admin
+          - service: backend
+    uses: ./.github/workflows/lint.yml
+    with:
+      service: ${{ matrix.service }}
 
   build:
-    needs: [code]
-    runs-on: ubuntu-slim
+    needs: [lint]
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            image: store-api
+          - service: frontend
+            image: store-frontend
+          - service: admin
+            image: store-admin
+    runs-on: ubuntu-latest
     steps:
-      - name: Build using Docker
-        run: echo "Building using Docker"
+      - name: Checkout code
+        uses: actions/checkout@v7
 
-  test:
-    needs: [build]
-    runs-on: ubuntu-slim
-    steps:
-      - name: Running test cases
-        run: echo "Testing the app"
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  deploy:
-    needs: [test]
-    runs-on: ubuntu-slim
-    steps:
-      - name: Deploying on the machine
-        run: echo "Deploying the code"
+      - name: Build and Push
+        uses: docker/build-push-action@v7
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          tags: ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest

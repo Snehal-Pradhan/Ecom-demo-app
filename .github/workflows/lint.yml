@@ -1,20 +1,47 @@
 name: Auto Linter
 
 on:
-  workflow_dispatch: 
+  workflow_call:
+    inputs:
+      service:
+        description: Which service to lint - frontend, admin, or backend.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Which service to lint - frontend, admin, or backend.
+        required: false
+        type: string
+        default: backend
 
 jobs:
   code:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout the code
         uses: actions/checkout@v7
-        
-      - name: Setup Python
-        run: echo "Installing Python"
 
-      - name: Install the Linter 
-        run: echo "Installing Linter"
+      - name: Setup Node
+        if: contains(fromJSON('["frontend", "admin"]'), inputs.service)
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache-dependency-path: ${{ inputs.service }}/package-lock.json
+
+      - name: Install the Linter
+        if: contains(fromJSON('["frontend", "admin"]'), inputs.service)
+        run: echo "Installing Linter for ${{ inputs.service }}"
+
+      - name: Setup Python
+        if: inputs.service == 'backend'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install the Linter
+        if: inputs.service == 'backend'
+        run: echo "Installing Linter for backend"
 
       - name: Check the files for linting
-        run: echo "Checking Files"
+        run: echo "Checking Files in ${{ inputs.service }}"
