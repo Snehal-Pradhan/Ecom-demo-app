@@ -5,14 +5,7 @@ on:
     branches: [main]
 
 jobs:
-  code:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-  lint:
-    needs: [code]
+  code-lint:
     strategy:
       matrix:
         include:
@@ -24,9 +17,9 @@ jobs:
       service: ${{ matrix.service }}
 
   build:
-    needs: [lint]
+    needs: [code-lint]
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - service: backend
