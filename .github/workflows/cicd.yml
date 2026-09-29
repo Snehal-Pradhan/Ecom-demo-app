@@ -16,7 +16,7 @@ jobs:
     with:
       service: ${{ matrix.service }}
 
-  test:
+  test-backend:
     needs: [code-lint]
     runs-on: ubuntu-latest
     services:
@@ -52,8 +52,36 @@ jobs:
         working-directory: backend
         run: python -m pytest
 
+  test-web:
+    needs: [code-lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: frontend
+          - service: admin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.service }}
+        run: npm ci
+
+      - name: Run tests
+        working-directory: ${{ matrix.service }}
+        run: npm test
+
   build:
-    needs: [test]
+    needs: [test-backend, test-web]
     strategy:
       fail-fast: true
       matrix:

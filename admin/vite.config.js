@@ -10,5 +10,11 @@ export default defineConfig(({ mode }) => {
       '/api': { target: apiTarget, changeOrigin: true },
     } },
     build: { outDir: 'dist', sourcemap: mode !== 'production' },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      setupFiles: ['./src/test/setup.js'],
+      include: ['src/**/*.test.{js,jsx}'],
+    },
   };
 });

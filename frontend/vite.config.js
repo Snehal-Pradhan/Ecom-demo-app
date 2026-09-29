@@ -29,5 +29,13 @@ export default defineConfig(({ mode }) => {
       outDir: 'dist',
       sourcemap: mode !== 'production',
     },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      setupFiles: ['./src/test/setup.js'],
+      // Test files live next to the code they cover, so the include pattern
+      // mirrors the source layout rather than a separate top-level directory.
+      include: ['src/**/*.test.{js,jsx}'],
+    },
   };
 });
