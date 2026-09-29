@@ -26,6 +26,7 @@ jobs:
   build:
     needs: [lint]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - service: backend
