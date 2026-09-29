@@ -44,4 +44,6 @@ jobs:
         with:
           context: ./${{ matrix.service }}
           push: true
-          tags: ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest
+          tags: |
+            ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest
