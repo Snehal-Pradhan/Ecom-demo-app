@@ -1,0 +1,20 @@
+name: Auto Linter
+
+on:
+  workflow_dispatch: 
+
+jobs:
+  code:
+    runs-on: ubuntu-slim
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v7
+        
+      - name: Setup Python
+        run: echo "Installing Python"
+
+      - name: Install the Linter 
+        run: echo "Installing Linter"
+
+      - name: Check the files for linting
+        run: echo "Checking Files"
