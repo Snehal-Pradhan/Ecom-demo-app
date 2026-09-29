@@ -16,8 +16,30 @@ jobs:
     with:
       service: ${{ matrix.service }}
 
-  build:
+  test:
     needs: [code-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        working-directory: backend
+        run: python -m pytest
+
+  build:
+    needs: [test]
     strategy:
       fail-fast: true
       matrix:
